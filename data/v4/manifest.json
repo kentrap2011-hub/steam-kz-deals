@@ -1,0 +1,18 @@
+{
+  "version": 4,
+  "source_items": 1261,
+  "shortlist_items": 423,
+  "chunk_size": 50,
+  "chunk_count": 9,
+  "needs_tuning": false,
+  "reason_counts": {
+    "strong_fit": 243,
+    "exceptional_discount": 124,
+    "very_high_rating": 123,
+    "strong_niche_fit": 95,
+    "mainstream_quality": 173,
+    "substantive_content": 10,
+    "high_confidence_adjacent": 34,
+    "recent_fit": 47
+  }
+}
