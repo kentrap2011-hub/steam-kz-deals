@@ -1,0 +1,21 @@
+{
+  "metadata": {
+    "collector_version": 1,
+    "source": "Steam Store",
+    "region": "Kazakhstan",
+    "country_code": "kz",
+    "specials_only": true,
+    "ignore_preferences": true,
+    "max_saved_price_kzt": 3500,
+    "started_at_utc": "2026-08-26T13:42:41.480248+00:00",
+    "updated_at_utc": "2026-08-26T13:56:02.469603+00:00",
+    "steam_total_reported": 14797,
+    "rows_seen": 14797,
+    "unique_rows_seen": 13896,
+    "requests_made": 296,
+    "cheap_items_saved": 0,
+    "unparsed_discounted_items": 0,
+    "complete": true
+  },
+  "items": []
+}
