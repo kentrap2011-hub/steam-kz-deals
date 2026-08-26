@@ -1,0 +1,469 @@
+name: Refine Steam KZ shortlist
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/refine-v3-shortlist.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  refine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Refine shortlist
+        run: |
+          python - <<'PY'
+          import json
+          import shutil
+          from collections import Counter
+          from pathlib import Path
+
+          SRC = Path("data/v3/shortlist")
+          OUT = Path("data/v4/shortlist")
+          CHUNK = 50
+
+          CORE = {
+              "Story Rich",
+              "Action-Adventure",
+              "Third Person",
+              "Choices Matter",
+              "Open World",
+              "Cinematic",
+              "Action RPG",
+              "Emotional",
+              "Dark Fantasy",
+              "Mystery",
+              "Stealth",
+              "JRPG",
+              "Detective",
+              "Cyberpunk",
+              "Character Action",
+              "Superhero",
+              "Western",
+              "Remake",
+              "Crime",
+              "Narrative",
+              "Hack and Slash",
+              "Souls-like",
+              "Survival Horror",
+              "Horror",
+              "Sci-fi",
+              "Fantasy",
+          }
+
+          SECONDARY = {
+              "Action",
+              "Adventure",
+              "RPG",
+              "Singleplayer",
+              "Exploration",
+              "Combat",
+          }
+
+          index = json.loads(
+              (SRC / "index.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          columns = index["columns"]
+          items = []
+
+          for path in sorted(
+              SRC.glob("chunk_*.tsv")
+          ):
+              for line in path.read_text(
+                  encoding="utf-8"
+              ).splitlines():
+
+                  if not line.strip():
+                      continue
+
+                  parts = line.split("\t")
+
+                  if len(parts) != len(columns):
+                      raise RuntimeError(
+                          f"Bad row in {path}"
+                      )
+
+                  item = dict(
+                      zip(columns, parts)
+                  )
+
+                  item["discount_percent"] = int(
+                      item["discount_percent"]
+                  )
+
+                  item["final_kzt"] = float(
+                      item["final_kzt"]
+                  )
+
+                  item["review_positive"] = (
+                      int(item["review_positive"])
+                      if item["review_positive"]
+                      else None
+                  )
+
+                  item["review_count"] = (
+                      int(item["review_count"])
+                      if item["review_count"]
+                      else None
+                  )
+
+                  item["reasons"] = set(
+                      filter(
+                          None,
+                          item["reasons"].split("|")
+                      )
+                  )
+
+                  item["fit_tags"] = set(
+                      filter(
+                          None,
+                          item["fit_tags"].split("|")
+                      )
+                  )
+
+                  items.append(item)
+
+          if len(items) != index["item_count"]:
+              raise RuntimeError(
+                  f"Expected {index['item_count']}, "
+                  f"read {len(items)}"
+              )
+
+          selected = []
+          counts = Counter()
+
+          for item in items:
+              price = item["final_kzt"]
+              discount = item[
+                  "discount_percent"
+              ]
+
+              positive = item[
+                  "review_positive"
+              ]
+
+              reviews = item[
+                  "review_count"
+              ]
+
+              core = (
+                  item["fit_tags"] & CORE
+              )
+
+              secondary = (
+                  item["fit_tags"]
+                  & SECONDARY
+              )
+
+              def rated(
+                  min_reviews,
+                  min_positive
+              ):
+                  return (
+                      reviews is not None
+                      and positive is not None
+                      and reviews >= min_reviews
+                      and positive >= min_positive
+                  )
+
+              reasons = []
+
+              # Хорошо известная игра
+              # независимо от жанра.
+              if (
+                  price <= 4500
+                  and discount >= 40
+                  and rated(5000, 80)
+              ):
+                  reasons.append(
+                      "mainstream_quality"
+                  )
+
+              # Сильное совпадение —
+              # одного Action/Adventure
+              # уже недостаточно.
+              if (
+                  price <= 4500
+                  and discount >= 35
+                  and len(core) >= 1
+                  and rated(1500, 78)
+              ):
+                  reasons.append(
+                      "strong_fit"
+                  )
+
+              # Небольшие инди оставляем,
+              # но требования выше.
+              if (
+                  price <= 2500
+                  and discount >= 40
+                  and len(core) >= 2
+                  and rated(300, 88)
+              ):
+                  reasons.append(
+                      "strong_niche_fit"
+                  )
+
+              # Огромная скидка только
+              # на достаточно известную игру.
+              if (
+                  price <= 3500
+                  and discount >= 75
+                  and rated(3000, 78)
+              ):
+                  reasons.append(
+                      "exceptional_discount"
+                  )
+
+              # Очень высокий рейтинг.
+              if (
+                  price <= 4000
+                  and discount >= 25
+                  and rated(3000, 92)
+              ):
+                  reasons.append(
+                      "very_high_rating"
+                  )
+
+              # Свежая игра только
+              # при сильном жанровом сигнале.
+              if (
+                  "recent_quality"
+                  in item["reasons"]
+                  and price <= 4000
+                  and discount >= 25
+                  and len(core) >= 1
+                  and rated(750, 82)
+              ):
+                  reasons.append(
+                      "recent_fit"
+                  )
+
+              # Соседние жанры:
+              # только очень уверенный сигнал.
+              if (
+                  price <= 2500
+                  and discount >= 50
+                  and not core
+                  and rated(10000, 88)
+              ):
+                  reasons.append(
+                      "high_confidence_adjacent"
+                  )
+
+              # DLC не удаляем,
+              # но 20 отзывов уже недостаточно.
+              if (
+                  "substantive_content"
+                  in item["reasons"]
+                  and price <= 3000
+                  and discount >= 50
+                  and (
+                      len(core) >= 1
+                      or len(secondary) >= 2
+                  )
+                  and rated(100, 80)
+              ):
+                  reasons.append(
+                      "substantive_content"
+                  )
+
+              if not reasons:
+                  continue
+
+              counts.update(reasons)
+
+              selected.append({
+                  "key": item["key"],
+                  "appid": item["appid"],
+                  "discount_percent":
+                      discount,
+                  "final_kzt":
+                      price,
+                  "review_positive":
+                      positive,
+                  "review_count":
+                      reviews,
+                  "core_fit_count":
+                      len(core),
+                  "reasons":
+                      reasons,
+                  "title":
+                      item["title"],
+              })
+
+          # Только сортировка.
+          # Никакого top-N и обрезания.
+          selected.sort(
+              key=lambda x: (
+                  -len(x["reasons"]),
+                  -x["core_fit_count"],
+                  -x["discount_percent"],
+                  x["final_kzt"],
+                  x["title"].casefold(),
+              )
+          )
+
+          if OUT.parent.exists():
+              shutil.rmtree(
+                  OUT.parent
+              )
+
+          OUT.mkdir(
+              parents=True
+          )
+
+          out_columns = [
+              "key",
+              "appid",
+              "discount_percent",
+              "final_kzt",
+              "review_positive",
+              "review_count",
+              "core_fit_count",
+              "reasons",
+              "title",
+          ]
+
+          def clean(value):
+              if value is None:
+                  return ""
+
+              if isinstance(value, list):
+                  value = "|".join(value)
+
+              return (
+                  str(value)
+                  .replace("\t", " ")
+                  .replace("\n", " ")
+                  .replace("\r", " ")
+              )
+
+          for num, start in enumerate(
+              range(
+                  0,
+                  len(selected),
+                  CHUNK
+              ),
+              1
+          ):
+              subset = selected[
+                  start:start + CHUNK
+              ]
+
+              text = "\n".join(
+                  "\t".join(
+                      clean(item[col])
+                      for col in out_columns
+                  )
+                  for item in subset
+              ) + "\n"
+
+              (
+                  OUT
+                  / f"chunk_{num:03d}.tsv"
+              ).write_text(
+                  text,
+                  encoding="utf-8"
+              )
+
+          chunk_count = (
+              len(selected)
+              + CHUNK - 1
+          ) // CHUNK
+
+          manifest = {
+              "version": 4,
+              "source_items":
+                  len(items),
+              "shortlist_items":
+                  len(selected),
+              "chunk_size":
+                  CHUNK,
+              "chunk_count":
+                  chunk_count,
+              "needs_tuning":
+                  len(selected) > 500,
+              "reason_counts":
+                  dict(counts),
+          }
+
+          (
+              OUT.parent
+              / "manifest.json"
+          ).write_text(
+              json.dumps(
+                  manifest,
+                  ensure_ascii=False,
+                  indent=2
+              ),
+              encoding="utf-8"
+          )
+
+          (
+              OUT
+              / "index.json"
+          ).write_text(
+              json.dumps(
+                  {
+                      **manifest,
+                      "format": "tsv",
+                      "columns":
+                          out_columns,
+                      "chunk_pattern":
+                          "data/v4/shortlist/"
+                          "chunk_NNN.tsv",
+                  },
+                  ensure_ascii=False,
+                  indent=2
+              ),
+              encoding="utf-8"
+          )
+
+          print(
+              json.dumps(
+                  manifest,
+                  ensure_ascii=False,
+                  indent=2
+              )
+          )
+
+          if not selected:
+              raise SystemExit(
+                  "Shortlist is empty"
+              )
+
+          PY
+
+      - name: Commit refined shortlist
+        run: |
+          git config user.name "steam-kz-bot"
+          git config user.email "steam-kz-bot@users.noreply.github.com"
+
+          git add -A data/v4/
+
+          if git diff --cached --quiet; then
+            echo "No changes"
+            exit 0
+          fi
+
+          git commit -m "Build refined Steam KZ shortlist"
+          git push
