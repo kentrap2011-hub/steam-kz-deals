@@ -1,0 +1,1284 @@
+name: Steam KZ v3 shortlist test
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/steam-v3-test.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: steam-kz-v3-test
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Collect full catalog and build shortlist
+        shell: bash
+        run: |
+          cat > /tmp/collector_v3.py <<'PY'
+          import json
+          import re
+          import shutil
+          import time
+          from collections import Counter
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          import requests
+          from bs4 import BeautifulSoup
+
+
+          URL = "https://store.steampowered.com/search/results/"
+          PAGE_SIZE = 50
+          REQUEST_DELAY = 0.9
+
+          OUT = Path("data/v3")
+          SHORT = OUT / "shortlist"
+          SHORT_CHUNK = 50
+
+
+          # Теги, близкие к твоим интересам.
+          # Но shortlist НЕ зависит только от них:
+          # ниже есть отдельные правила по качеству,
+          # популярности, цене и размеру скидки.
+          FIT_TAGS = {
+              19: "Action",
+              21: "Adventure",
+              122: "RPG",
+              4182: "Singleplayer",
+              1742: "Story Rich",
+              4106: "Action-Adventure",
+              1697: "Third Person",
+              6426: "Choices Matter",
+              1695: "Open World",
+              3834: "Exploration",
+              3993: "Combat",
+              4145: "Cinematic",
+              4231: "Action RPG",
+              5608: "Emotional",
+              4604: "Dark Fantasy",
+              5716: "Mystery",
+              1687: "Stealth",
+              4434: "JRPG",
+              5613: "Detective",
+              4115: "Cyberpunk",
+              3955: "Character Action",
+              1671: "Superhero",
+              1647: "Western",
+              5708: "Remake",
+              6378: "Crime",
+              7702: "Narrative",
+              1646: "Hack and Slash",
+              29482: "Souls-like",
+              3978: "Survival Horror",
+              1667: "Horror",
+              3942: "Sci-fi",
+              1684: "Fantasy",
+          }
+
+
+          SOFTWARE_TAGS = {
+              87,       # Utilities
+              8013,     # Software
+              84,       # Design & Illustration
+              872,      # Animation & Modeling
+              784,      # Video Production
+              1027,     # Audio Production
+              809,      # Photo Editing
+              13906,    # Game Development
+              1445,     # Software Training
+              5432,     # Programming
+              5407,     # Benchmark
+              603297,   # Hardware
+          }
+
+
+          GAME_TAGS = set(FIT_TAGS) | {
+              9,     # Strategy
+              599,   # Simulation
+              699,   # Racing
+              701,   # Sports
+              1774,  # Shooter
+              1625,  # Platformer
+              1716,  # Roguelike
+              3959,  # Roguelite
+              1666,  # Card Game
+              1752,  # Rhythm
+              1743,  # Fighting
+              1770,  # Board Game
+          }
+
+
+          EXTRA_RE = re.compile(
+              r"\b("
+              r"soundtrack|"
+              r"ost|"
+              r"art\s*book|"
+              r"artbook|"
+              r"wallpapers?|"
+              r"skin\s*pack|"
+              r"costume\s*pack|"
+              r"cosmetic\s*pack|"
+              r"avatar\s*pack|"
+              r"digital\s*artwork|"
+              r"digital\s*artbook|"
+              r"music\s*pack|"
+              r"supporter\s*pack"
+              r")\b",
+              re.I,
+          )
+
+
+          # Это НЕ исключаем.
+          # Наоборот, подобный контент может попасть
+          # отдельным независимым правилом.
+          CONTENT_RE = re.compile(
+              r"\b("
+              r"expansion|"
+              r"season\s*pass|"
+              r"story\s*(?:pack|dlc)|"
+              r"episode|"
+              r"chapter|"
+              r"campaign"
+              r")\b",
+              re.I,
+          )
+
+
+          REVIEW_RE = re.compile(
+              r"(\d{1,3})%\s+of\s+the\s+"
+              r"([\d,]+)\s+user reviews",
+              re.I,
+          )
+
+
+          session = requests.Session()
+
+          session.headers.update({
+              "User-Agent": (
+                  "Mozilla/5.0 "
+                  "(Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 "
+                  "Chrome/140 Safari/537.36"
+              ),
+
+              "Accept":
+                  "application/json,text/plain,*/*",
+
+              "Accept-Language":
+                  "en-US,en;q=0.9",
+          })
+
+
+          session.cookies.update({
+              "birthtime":
+                  "568022401",
+
+              "lastagecheckage":
+                  "1-January-1988",
+
+              "wants_mature_content":
+                  "1",
+          })
+
+
+          def to_int(value):
+              try:
+                  return int(value)
+
+              except (TypeError, ValueError):
+                  return None
+
+
+          def parse_list(value):
+              try:
+                  parsed = json.loads(
+                      value or "[]"
+                  )
+
+                  if isinstance(parsed, list):
+                      return parsed
+
+              except Exception:
+                  pass
+
+              return []
+
+
+          def fetch_page(start):
+              params = {
+                  "query": "",
+                  "start": start,
+                  "count": PAGE_SIZE,
+
+                  "specials": 1,
+
+                  "cc": "kz",
+                  "l": "english",
+
+                  "infinite": 1,
+
+                  "ignore_preferences": 1,
+
+                  "sort_by": "Name_ASC",
+              }
+
+
+              last_error = None
+
+
+              for attempt in range(8):
+                  try:
+                      response = session.get(
+                          URL,
+                          params=params,
+                          timeout=40,
+                      )
+
+
+                      if response.status_code == 429:
+                          retry_after = to_int(
+                              response.headers.get(
+                                  "Retry-After"
+                              )
+                          )
+
+                          wait = (
+                              retry_after
+                              or min(
+                                  90,
+                                  3 * (2 ** attempt)
+                              )
+                          )
+
+                          print(
+                              "429",
+                              start,
+                              "wait",
+                              wait,
+                          )
+
+                          time.sleep(wait)
+                          continue
+
+
+                      response.raise_for_status()
+
+                      return response.json()
+
+
+                  except Exception as exc:
+                      last_error = exc
+
+                      wait = min(
+                          90,
+                          3 * (2 ** attempt)
+                      )
+
+                      print(
+                          "retry",
+                          start,
+                          exc,
+                          "wait",
+                          wait,
+                      )
+
+                      time.sleep(wait)
+
+
+              raise RuntimeError(
+                  f"failed start={start}: "
+                  f"{last_error}"
+              )
+
+
+          def identity(row):
+              item_key = (
+                  row.get("data-ds-itemkey")
+                  or ""
+              ).strip()
+
+
+              if item_key:
+                  return item_key
+
+
+              appid = row.get(
+                  "data-ds-appid"
+              )
+
+
+              if appid:
+                  return (
+                      "App_"
+                      + appid.split(",")[0]
+                  )
+
+
+              return (
+                  row.get("href")
+                  or ""
+              ).split("?", 1)[0]
+
+
+          def parse_release(text):
+              try:
+                  return datetime.strptime(
+                      text.strip(),
+                      "%d %b, %Y",
+                  ).date()
+
+              except Exception:
+                  return None
+
+
+          def parse_row(row):
+              title_node = row.select_one(
+                  "span.title"
+              )
+
+
+              if not title_node:
+                  return None
+
+
+              title = title_node.get_text(
+                  " ",
+                  strip=True,
+              )
+
+
+              block = row.select_one(
+                  ".discount_block"
+              )
+
+
+              wrapper = row.select_one(
+                  ".search_price_discount_combined"
+              )
+
+
+              discount = (
+                  to_int(
+                      block.get(
+                          "data-discount"
+                      )
+                  )
+                  if block
+                  else None
+              )
+
+
+              final_minor = (
+                  to_int(
+                      block.get(
+                          "data-price-final"
+                      )
+                  )
+                  if block
+                  else None
+              )
+
+
+              if (
+                  final_minor is None
+                  and wrapper
+              ):
+                  final_minor = to_int(
+                      wrapper.get(
+                          "data-price-final"
+                      )
+                  )
+
+
+              tag_ids = [
+                  to_int(value)
+                  for value in parse_list(
+                      row.get(
+                          "data-ds-tagids"
+                      )
+                  )
+              ]
+
+
+              tag_ids = [
+                  value
+                  for value in tag_ids
+                  if value is not None
+              ]
+
+
+              review = row.select_one(
+                  ".search_review_summary"
+              )
+
+
+              positive = None
+              review_count = None
+
+
+              if review:
+                  tooltip = (
+                      review.get(
+                          "data-tooltip-html"
+                      )
+                      or ""
+                  )
+
+
+                  match = REVIEW_RE.search(
+                      tooltip
+                  )
+
+
+                  if match:
+                      positive = int(
+                          match.group(1)
+                      )
+
+                      review_count = int(
+                          match.group(2)
+                          .replace(",", "")
+                      )
+
+
+              release_node = row.select_one(
+                  ".search_released"
+              )
+
+
+              release_text = (
+                  release_node.get_text(
+                      " ",
+                      strip=True,
+                  )
+                  if release_node
+                  else ""
+              )
+
+
+              appid = row.get(
+                  "data-ds-appid"
+              )
+
+
+              if appid:
+                  appid = appid.split(
+                      ","
+                  )[0]
+
+
+              return {
+                  "key":
+                      identity(row),
+
+                  "appid":
+                      appid,
+
+                  "title":
+                      title,
+
+                  "discount_percent":
+                      discount,
+
+                  "final_minor":
+                      final_minor,
+
+                  "final_kzt": (
+                      final_minor / 100
+                      if final_minor is not None
+                      else None
+                  ),
+
+                  "review_positive":
+                      positive,
+
+                  "review_count":
+                      review_count,
+
+                  "tag_ids":
+                      tag_ids,
+
+                  "release_date":
+                      release_text,
+
+                  "url": (
+                      row.get("href")
+                      or ""
+                  ).strip(),
+              }
+
+
+          def shortlist_reasons(
+              item,
+              today,
+          ):
+              discount = item[
+                  "discount_percent"
+              ]
+
+              price = item[
+                  "final_kzt"
+              ]
+
+
+              if (
+                  discount is None
+                  or discount <= 0
+                  or price is None
+                  or price <= 0
+              ):
+                  return [], []
+
+
+              title = item["title"]
+
+              tags = set(
+                  item["tag_ids"]
+              )
+
+
+              # Очевидные саундтреки,
+              # скины и т.п.
+              if EXTRA_RE.search(title):
+                  return [], []
+
+
+              # Отдельный софт, а не игры.
+              if (
+                  tags & SOFTWARE_TAGS
+                  and not tags & GAME_TAGS
+              ):
+                  return [], []
+
+
+              fit_tags = [
+                  FIT_TAGS[tag]
+                  for tag in item["tag_ids"]
+                  if tag in FIT_TAGS
+              ]
+
+
+              positive = item[
+                  "review_positive"
+              ]
+
+              review_count = item[
+                  "review_count"
+              ]
+
+
+              reasons = []
+
+
+              def reviews(
+                  minimum_count,
+                  minimum_positive,
+              ):
+                  return (
+                      review_count is not None
+                      and positive is not None
+                      and review_count
+                          >= minimum_count
+                      and positive
+                          >= minimum_positive
+                  )
+
+
+              # Недорогая и уже достаточно
+              # проверенная игроками игра.
+              if (
+                  price <= 3500
+                  and discount >= 40
+                  and reviews(3000, 75)
+              ):
+                  reasons.append(
+                      "affordable_quality"
+                  )
+
+
+              # Жанрово близкая игра.
+              if (
+                  price <= 4500
+                  and discount >= 30
+                  and fit_tags
+                  and reviews(1000, 72)
+              ):
+                  reasons.append(
+                      "genre_fit"
+                  )
+
+
+              # Очень большая скидка
+              # на нормально принятую игру.
+              if (
+                  price <= 5000
+                  and discount >= 70
+                  and reviews(1000, 72)
+              ):
+                  reasons.append(
+                      "big_discount"
+                  )
+
+
+              # Очень популярная,
+              # хорошо принятая игра.
+              if (
+                  price <= 5000
+                  and discount >= 35
+                  and reviews(20000, 80)
+              ):
+                  reasons.append(
+                      "popular_quality"
+                  )
+
+
+              # Очень высокий процент
+              # положительных отзывов.
+              if (
+                  price <= 4500
+                  and discount >= 25
+                  and reviews(3000, 90)
+              ):
+                  reasons.append(
+                      "very_high_rating"
+                  )
+
+
+              # Особенно дешёвая
+              # качественная игра.
+              if (
+                  price <= 2000
+                  and discount >= 25
+                  and reviews(1000, 80)
+              ):
+                  reasons.append(
+                      "cheap_quality"
+                  )
+
+
+              # Менее известная,
+              # но очень хорошо принятая
+              # жанрово близкая игра.
+              if (
+                  fit_tags
+                  and price <= 2500
+                  and discount >= 40
+                  and reviews(100, 88)
+              ):
+                  reasons.append(
+                      "niche_fit"
+                  )
+
+
+              release_date = parse_release(
+                  item["release_date"]
+              )
+
+
+              if release_date:
+                  age_days = (
+                      today
+                      - release_date
+                  ).days
+
+
+                  if (
+                      0 <= age_days <= 730
+                      and price <= 4500
+                      and discount >= 20
+                      and reviews(500, 80)
+                  ):
+                      reasons.append(
+                          "recent_quality"
+                      )
+
+
+              # Содержательные DLC/Expansion/
+              # Season Pass не выкидываем.
+              if (
+                  CONTENT_RE.search(title)
+                  and fit_tags
+                  and price <= 3500
+                  and discount >= 50
+              ):
+                  reasons.append(
+                      "substantive_content"
+                  )
+
+
+              return reasons, fit_tags
+
+
+          OUT.mkdir(
+              parents=True,
+              exist_ok=True,
+          )
+
+
+          started = datetime.now(
+              timezone.utc
+          )
+
+
+          catalog = {}
+
+          start = 0
+          total = None
+
+          requests_made = 0
+          rows_seen = 0
+
+          seen_pages = set()
+
+
+          while True:
+              data = fetch_page(start)
+
+              requests_made += 1
+
+
+              current_total = to_int(
+                  data.get(
+                      "total_count"
+                  )
+              )
+
+
+              if current_total is not None:
+                  total = current_total
+
+
+              soup = BeautifulSoup(
+                  data.get(
+                      "results_html",
+                      ""
+                  ),
+                  "html.parser",
+              )
+
+
+              rows = soup.select(
+                  "a.search_result_row"
+              )
+
+
+              rows_seen += len(rows)
+
+
+              print(
+                  "start",
+                  start,
+                  "rows",
+                  len(rows),
+                  "total",
+                  total,
+                  "unique",
+                  len(catalog),
+              )
+
+
+              if not rows:
+                  break
+
+
+              page_keys = []
+
+
+              for row in rows:
+                  item = parse_row(row)
+
+
+                  if item:
+                      page_keys.append(
+                          item["key"]
+                      )
+
+                      catalog[
+                          item["key"]
+                      ] = item
+
+
+              signature = tuple(
+                  page_keys
+              )
+
+
+              if signature in seen_pages:
+                  raise RuntimeError(
+                      "Repeated Steam page "
+                      f"at start={start}"
+                  )
+
+
+              seen_pages.add(
+                  signature
+              )
+
+
+              start += PAGE_SIZE
+
+
+              if len(rows) < PAGE_SIZE:
+                  break
+
+
+              if (
+                  total is not None
+                  and start >= total
+              ):
+                  break
+
+
+              time.sleep(
+                  REQUEST_DELAY
+              )
+
+
+          items = sorted(
+              catalog.values(),
+              key=lambda item: (
+                  item["title"]
+                  .casefold(),
+
+                  item["key"],
+              ),
+          )
+
+
+          coverage = (
+              len(items) / total
+              if total
+              else None
+          )
+
+
+          complete = bool(
+              total
+              and len(items) == total
+              and rows_seen == total
+          )
+
+
+          today = datetime.now(
+              timezone.utc
+          ).date()
+
+
+          shortlist = []
+
+          reason_counts = Counter()
+
+          excluded_extra = 0
+          excluded_software = 0
+
+
+          for item in items:
+              tags = set(
+                  item["tag_ids"]
+              )
+
+
+              if EXTRA_RE.search(
+                  item["title"]
+              ):
+                  excluded_extra += 1
+
+
+              elif (
+                  tags & SOFTWARE_TAGS
+                  and not tags & GAME_TAGS
+              ):
+                  excluded_software += 1
+
+
+              reasons, fit_tags = (
+                  shortlist_reasons(
+                      item,
+                      today,
+                  )
+              )
+
+
+              if not reasons:
+                  continue
+
+
+              reason_counts.update(
+                  reasons
+              )
+
+
+              shortlist.append({
+                  "key":
+                      item["key"],
+
+                  "appid":
+                      item["appid"],
+
+                  "discount_percent":
+                      item[
+                          "discount_percent"
+                      ],
+
+                  "final_kzt":
+                      item["final_kzt"],
+
+                  "review_positive":
+                      item[
+                          "review_positive"
+                      ],
+
+                  "review_count":
+                      item[
+                          "review_count"
+                      ],
+
+                  "reasons":
+                      reasons,
+
+                  "fit_tags":
+                      fit_tags,
+
+                  "title":
+                      item["title"],
+              })
+
+
+          shortlist.sort(
+              key=lambda item: (
+                  item["final_kzt"],
+
+                  -item[
+                      "discount_percent"
+                  ],
+
+                  item["title"]
+                  .casefold(),
+              )
+          )
+
+
+          finished = datetime.now(
+              timezone.utc
+          )
+
+
+          manifest = {
+              "collector_version": 3,
+
+              "source":
+                  "Steam Store",
+
+              "country_code":
+                  "kz",
+
+              "started_at_utc":
+                  started.isoformat(),
+
+              "updated_at_utc":
+                  finished.isoformat(),
+
+              "steam_total_reported":
+                  total,
+
+              "rows_seen":
+                  rows_seen,
+
+              "unique_items":
+                  len(items),
+
+              "requests_made":
+                  requests_made,
+
+              "coverage_ratio": (
+                  round(
+                      coverage,
+                      6,
+                  )
+                  if coverage is not None
+                  else None
+              ),
+
+              "complete":
+                  complete,
+
+              "items_with_review_data":
+                  sum(
+                      item[
+                          "review_count"
+                      ] is not None
+                      for item in items
+                  ),
+
+              "items_with_tags":
+                  sum(
+                      bool(
+                          item["tag_ids"]
+                      )
+                      for item in items
+                  ),
+
+              "shortlist_items":
+                  len(shortlist),
+
+              "shortlist_chunk_size":
+                  SHORT_CHUNK,
+
+              # Если получилось слишком
+              # много кандидатов,
+              # ничего не режем.
+              # Просто отмечаем, что
+              # правила надо подкрутить.
+              "shortlist_needs_tuning":
+                  len(shortlist) > 800,
+
+              "excluded_obvious_extras":
+                  excluded_extra,
+
+              "excluded_software_only":
+                  excluded_software,
+
+              "reason_counts":
+                  dict(reason_counts),
+          }
+
+
+          (OUT / "manifest.json").write_text(
+              json.dumps(
+                  manifest,
+                  ensure_ascii=False,
+                  indent=2,
+              ),
+              encoding="utf-8",
+          )
+
+
+          # Полный обогащённый каталог —
+          # только как архив и QA.
+          (OUT / "catalog_index.json").write_text(
+              json.dumps(
+                  {
+                      "metadata":
+                          manifest,
+
+                      "items":
+                          items,
+                  },
+                  ensure_ascii=False,
+                  indent=2,
+              ),
+              encoding="utf-8",
+          )
+
+
+          if SHORT.exists():
+              shutil.rmtree(
+                  SHORT
+              )
+
+
+          SHORT.mkdir(
+              parents=True,
+              exist_ok=True,
+          )
+
+
+          columns = [
+              "key",
+              "appid",
+              "discount_percent",
+              "final_kzt",
+              "review_positive",
+              "review_count",
+              "reasons",
+              "fit_tags",
+              "title",
+          ]
+
+
+          def clean(value):
+              if value is None:
+                  return ""
+
+
+              if isinstance(
+                  value,
+                  list,
+              ):
+                  value = "|".join(
+                      map(str, value)
+                  )
+
+
+              return (
+                  str(value)
+                  .replace("\t", " ")
+                  .replace("\r", " ")
+                  .replace("\n", " ")
+              )
+
+
+          for chunk_number, start in enumerate(
+              range(
+                  0,
+                  len(shortlist),
+                  SHORT_CHUNK,
+              ),
+              start=1,
+          ):
+              subset = shortlist[
+                  start:
+                  start + SHORT_CHUNK
+              ]
+
+
+              lines = []
+
+
+              for item in subset:
+                  lines.append(
+                      "\t".join(
+                          clean(
+                              item[column]
+                          )
+                          for column in columns
+                      )
+                  )
+
+
+              (
+                  SHORT
+                  / f"chunk_{chunk_number:03d}.tsv"
+              ).write_text(
+                  "\n".join(lines) + "\n",
+                  encoding="utf-8",
+              )
+
+
+          chunk_count = (
+              len(shortlist)
+              + SHORT_CHUNK
+              - 1
+          ) // SHORT_CHUNK
+
+
+          shortlist_index = {
+              "version":
+                  1,
+
+              "format":
+                  "tsv",
+
+              "columns":
+                  columns,
+
+              "item_count":
+                  len(shortlist),
+
+              "chunk_size":
+                  SHORT_CHUNK,
+
+              "chunk_count":
+                  chunk_count,
+
+              "chunk_pattern":
+                  "data/v3/shortlist/"
+                  "chunk_NNN.tsv",
+
+              "source_total":
+                  total,
+
+              "source_complete":
+                  complete,
+
+              "source_coverage_ratio": (
+                  round(
+                      coverage,
+                      6,
+                  )
+                  if coverage is not None
+                  else None
+              ),
+
+              "needs_tuning":
+                  len(shortlist) > 800,
+
+              "reason_counts":
+                  dict(reason_counts),
+          }
+
+
+          (
+              SHORT
+              / "index.json"
+          ).write_text(
+              json.dumps(
+                  shortlist_index,
+                  ensure_ascii=False,
+                  indent=2,
+              ),
+              encoding="utf-8",
+          )
+
+
+          print(
+              json.dumps(
+                  manifest,
+                  ensure_ascii=False,
+                  indent=2,
+              )
+          )
+
+
+          if not complete:
+              raise SystemExit(
+                  "Full Steam traversal "
+                  "completeness check failed"
+              )
+
+
+          if not shortlist:
+              raise SystemExit(
+                  "Shortlist is empty"
+              )
+
+          PY
+
+          python /tmp/collector_v3.py
+
+      - name: Commit v3 test data
+        shell: bash
+        run: |
+          git config user.name "steam-kz-bot"
+          git config user.email "steam-kz-bot@users.noreply.github.com"
+
+          git add data/v3/
+
+          if git diff --cached --quiet; then
+            echo "No changes"
+            exit 0
+          fi
+
+          git commit -m "Build Steam KZ v3 shortlist"
+          git push
