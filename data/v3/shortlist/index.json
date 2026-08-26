@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "format": "tsv",
+  "columns": [
+    "key",
+    "appid",
+    "discount_percent",
+    "final_kzt",
+    "review_positive",
+    "review_count",
+    "reasons",
+    "fit_tags",
+    "title"
+  ],
+  "item_count": 1261,
+  "chunk_size": 50,
+  "chunk_count": 26,
+  "chunk_pattern": "data/v3/shortlist/chunk_NNN.tsv",
+  "source_total": 15225,
+  "source_complete": true,
+  "source_coverage_ratio": 1.0,
+  "needs_tuning": true,
+  "reason_counts": {
+    "affordable_quality": 245,
+    "genre_fit": 609,
+    "very_high_rating": 153,
+    "cheap_quality": 484,
+    "recent_quality": 197,
+    "big_discount": 416,
+    "niche_fit": 536,
+    "substantive_content": 116,
+    "popular_quality": 52
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "collector_version": 3,
+  "source": "Steam Store",
+  "country_code": "kz",
+  "started_at_utc": "2026-08-26T18:54:36.709655+00:00",
+  "updated_at_utc": "2026-08-26T19:06:17.814968+00:00",
+  "steam_total_reported": 15225,
+  "rows_seen": 15225,
+  "unique_items": 15225,
+  "requests_made": 305,
+  "coverage_ratio": 1.0,
+  "complete": true,
+  "items_with_review_data": 8970,
+  "items_with_tags": 14333,
+  "shortlist_items": 1261,
+  "shortlist_chunk_size": 50,
+  "shortlist_needs_tuning": true,
+  "excluded_obvious_extras": 1646,
+  "excluded_software_only": 171,
+  "reason_counts": {
+    "affordable_quality": 245,
+    "genre_fit": 609,
+    "very_high_rating": 153,
+    "cheap_quality": 484,
+    "recent_quality": 197,
+    "big_discount": 416,
+    "niche_fit": 536,
+    "substantive_content": 116,
+    "popular_quality": 52
+  }
+}
